@@ -1,0 +1,972 @@
+---
+title: "MSc. thesis code"
+author: "Nirmal Sitaldin"
+date: "6/23/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r Loading libraries}
+
+#Data cleaning & exploration
+library(dplyr)
+library(magrittr)
+library(foreign)
+library(tidyverse)
+library(moments)
+library(EnvStats)
+library(xfun)
+
+#Visualization
+library(ggplot2)
+library(ggpubr)
+
+#PCA
+library(factoextra)
+library(Gifi)
+library(ggbiplot)
+library(vegan)
+
+#Network analysis
+library(caret)
+library(bootnet)
+library(Rcpp)
+library(qgraph)
+library(NetworkToolbox)
+library(mgm)
+library(EstimateGroupNetwork)
+library(JGL)
+devtools::install_github("cvborkulo/NetworkComparisonTest")
+library(NetworkComparisonTest)
+library(reshape2)
+library(lavaan)
+
+
+```
+
+```{r Loading and subsetting data}
+
+data <- read.spss("data/SPSS_data",
+                use.value.label=FALSE, 
+                to.data.frame=TRUE)
+
+df <- data %>%
+        select(c(1:4), matches("_12"), 49) %>%
+        dplyr::rename(Score = 'Schildsymp_12',
+                      Profiel = 'sfsgez5')
+
+
+hypo <- df %>%
+          filter(Profiel == 2 | Profiel == 4 | Profiel == 6) %>%
+          select(matches("_12"))
+
+hyper <- df %>%
+          filter(Profiel == 3 | Profiel == 5 | Profiel == 7) %>%
+          select(matches("_12"))
+
+healthy <- df %>%
+          filter(Profiel == 1) %>%
+          select(matches("_12"))
+
+rest <- df %>%
+          filter(Profiel == 0) %>%
+          select(matches("_12"))
+
+
+groups <- list(hypo, hyper, healthy, rest)
+networknames = c("1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12")
+var_names = c("General fatigue","Sleeping problems","Forgetfulness",
+              "Difficulties concentrating", "Shortness of breath","Leg cramps",
+              "Fluid retention in hands/feet", "General fluid retention",
+              "Muscle ache", "Aching or stiff joints","Worrying","Mood changes")
+short_names = c("GF", "SP", "F", "DC", "SoB", "LC",
+                "FRHF", "FR", "MA", "AoSJ", "W", "M")
+
+
+
+
+
+```
+
+Before estimating the network, node predictability shall be generated per group.
+More info: https://www.r-bloggers.com/2016/10/predictability-in-network-models/
+
+```{r Internal consistency}
+
+#Cronbach's alpha
+
+alpha1 <- psych::alpha(cor_auto(hypo)); alpha1$total$std.alpha # 0.8095705
+alpha2 <- psych::alpha(cor_auto(hyper), check.keys=TRUE); alpha2$total$std.alpha # 0.7804681
+alpha3 <- psych::alpha(cor_auto(healthy)); alpha3$total$std.alpha # 0.8182226
+alpha4 <- psych::alpha(cor_auto(rest)); alpha4$total$std.alpha # 0.8130116
+
+#Composite reliability
+
+test1 <- hypo
+test2 <- hyper
+test3 <- healthy
+test4 <- rest
+
+colnames(test1)<-print(paste('i',1:12,sep=''))
+colnames(test2)<-print(paste('i',1:12,sep=''))
+colnames(test3)<-print(paste('i',1:12,sep=''))
+colnames(test4)<-print(paste('i',1:12,sep=''))
+
+items <- paste(names(hypo), collapse = "+")
+model <- paste("bla", items, sep = "=~")
+
+fit1 <- cfa(model, data = hypo)
+fit2 <- cfa(model, data = hyper)
+fit3 <- cfa(model, data = healthy)
+fit4 <- cfa(model, data = rest)
+
+l1 <- standardizedSolution(fit1)
+l2 <- standardizedSolution(fit2)
+l3 <- standardizedSolution(fit3)
+l4 <- standardizedSolution(fit4)
+
+l1 <- l1$est.std[l1$op == "=~"]
+l2 <- l2$est.std[l2$op == "=~"]
+l3 <- l3$est.std[l3$op == "=~"]
+l4 <- l4$est.std[l4$op == "=~"]
+
+re1 <- 1 - l1^2
+re2 <- 1 - l2^2
+re3 <- 1 - l3^2
+re4 <- 1 - l4^2
+
+composite_reliability1 <- sum(l1)^2 / (sum(l1)^2 + sum(re1)); composite_reliability1 # 0.7177437
+composite_reliability2 <- sum(l2)^2 / (sum(l2)^2 + sum(re2)); composite_reliability2 # 0.7087843
+composite_reliability3 <- sum(l3)^2 / (sum(l3)^2 + sum(re3)); composite_reliability3 # 0.754518
+composite_reliability4 <- sum(l4)^2 / (sum(l4)^2 + sum(re4)); composite_reliability4 # 0.740599
+
+save(alpha1, alpha2, alpha3, alpha4, composite_reliability1, composite_reliability2, composite_reliability3, composite_reliability4, file = "InternalConsistency.Rdata")
+
+```
+
+
+
+```{r Desciptives}
+
+means1 <- colMeans(hypo, na.rm=T)
+sds1 <- as.vector(sapply(hypo, sd, na.rm=T))
+
+means2 <- colMeans(hyper, na.rm=T)
+sds2 <- as.vector(sapply(hyper, sd, na.rm=T))
+
+means3 <- colMeans(healthy, na.rm=T)
+sds3 <- as.vector(sapply(healthy, sd, na.rm=T))
+
+means4 <- colMeans(rest, na.rm=T)
+sds4 <- as.vector(sapply(rest, sd, na.rm=T))
+
+means <- as.data.frame(cbind(means1,means2, means3, means4))
+
+means <- mutate(means, id = rownames(means))
+colnames(means)<-c("1", "2", "3", "4", "Symptoms")
+means_long <- melt(means, id="Symptoms")
+means_long <- means_long %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="Vermoeid_12", 1)) %>%
+            mutate(Symptoms=replace(Symptoms, 
+                                    Symptoms=="Doorslaapprob_12", 2)) %>%
+            mutate(Symptoms=replace(Symptoms, 
+                                    Symptoms=="Vergeetachtig_12", 3)) %>%
+            mutate(Symptoms=replace(Symptoms, 
+                                    Symptoms=="Concentratie_12", 4)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="Benauwd_12", 5)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="Krampbenen_12", 6)) %>%
+            mutate(Symptoms=replace(Symptoms, 
+                                    Symptoms=="Vochthandvoet_12", 7)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="Vocht_12", 8)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="Pijnspieren_12", 9)) %>%
+            mutate(Symptoms=replace(Symptoms, 
+                                    Symptoms=="Pijngewrichten_12", 10)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="Piekeren_12", 11)) %>%
+            mutate(Symptoms=replace(Symptoms, 
+                                    Symptoms=="Wisselendestemming_12", 12))
+means_long$Symptoms <- as.numeric(means_long$Symptoms)
+names(means_long)[2] <- "Datasets"
+type <- c("Mean")
+means_long <- cbind(means_long, type)
+
+sds <- as.data.frame(cbind(sds1,sds2, sds3, sds4))
+sds <- mutate(sds, id = rownames(sds))
+colnames(sds)<-c("1", "2", "3", "4", "Symptoms")
+sds_long <- melt(sds, id="Symptoms")
+sds_long$Symptoms <- as.numeric(sds_long$Symptoms)
+names(sds_long)[2] <- "Datasets"
+type <- c("SD")
+sds_long <- cbind(sds_long, type)
+
+merged <- rbind(means_long, sds_long)
+colnames(merged)[4] <- "Type"
+
+pdf("Fig9s.pdf", width=6, height=4.5,useDingbats=FALSE) 
+p1 <- ggplot(data=merged, aes(x=Symptoms, y=value, colour=Datasets, linetype=Type)) +
+geom_line(aes(x = Symptoms, y = value, col = Datasets, linetype = Type)) +
+ geom_point(aes(x = Symptoms, y = value, col = Datasets),
+   shape = 21, fill = "white", size = 1.5, stroke = 1) +
+  xlab(" ") + ylab(" ") +
+  scale_y_continuous(limits = c(0, 3)) + 
+  scale_x_continuous(breaks=c(1:12), labels=short_names) +
+  theme_bw() +
+  theme(panel.grid.minor=element_blank(), axis.text.x = element_text(angle = 60, hjust = 1))
+dev.off(); p1
+p1
+class(merged$Symptoms)
+
+```
+
+```{r Measuring explained variance by each node per network}
+
+type=rep('g', 12) 
+fit1 <- mgm(na.omit(hypo), type=type, lev=rep(1,12), 
+            lambdaSel = "EBIC", lambdaGam = 0) 
+pred1 <- predict(fit1, na.omit(hypo), error.continuous='VarExpl')     
+
+fit2 <- mgm(na.omit(hyper), type=type, lev=rep(1,12), 
+            lambdaSel = "EBIC", lambdaGam = 0) 
+pred2 <- predict(fit2, na.omit(hyper), error.continuous='VarExpl')    
+
+fit3 <- mgm(na.omit(healthy), type=type, lev=rep(1,12), 
+            lambdaSel = "EBIC", lambdaGam = 0) 
+pred3 <- predict(fit3, na.omit(healthy), error.continuous='VarExpl')  
+
+fit4 <- mgm(na.omit(rest), type=type, lev=rep(1,12), 
+            lambdaSel = "EBIC", lambdaGam = 0) 
+pred4 <- predict(fit4, na.omit(rest), error.continuous='VarExpl') 
+
+pred1$errors
+pred2$errors
+pred3$errors
+pred4$errors
+
+save(fit1, fit2, fit3, fit4, pred1, pred2, pred3, pred4, file = "mgmpred.Rdata")
+load("mgmpred.Rdata")
+
+# What is the average node predictability in each dataset? #.226
+mean(pred1$error$R2) #0.2620833
+mean(pred2$error$R2) #0.22325
+mean(pred3$error$R2) #0.30225
+mean(pred4$error$R2) #0.2843333
+
+
+#Will be displayed in estimated network graphs
+
+
+```
+
+Generate networks for each group through both individual estimation and JGL
+
+```{r Individual network estimation}
+
+
+#Hypothyroidism
+network1_0 <- estimateNetwork(hypo, default="EBICglasso", tuning = 0)
+network1_25 <- estimateNetwork(hypo, default="EBICglasso", tuning = .25)
+network1_50 <- estimateNetwork(hypo, default="EBICglasso", tuning = .5)
+
+#Hyperthyroidism
+
+network2_0 <- estimateNetwork(hyper, default="EBICglasso", tuning = 0)
+network2_25 <- estimateNetwork(hyper, default="EBICglasso", tuning = .25)
+network2_50 <- estimateNetwork(hyper, default="EBICglasso", tuning = .5)
+
+#Euthyroid
+network3_0 <- estimateNetwork(healthy, default="EBICglasso", tuning = 0)
+network3_25 <- estimateNetwork(healthy, default="EBICglasso", tuning = .25)
+network3_50 <- estimateNetwork(healthy, default="EBICglasso", tuning = .5)
+
+#Rest group
+network4_0 <- estimateNetwork(rest, default="EBICglasso", tuning = .0)
+network4_25 <- estimateNetwork(rest, default="EBICglasso", tuning = .25)
+network4_50 <- estimateNetwork(rest, default="EBICglasso", tuning = .5)
+
+#Choosing model for bootstrapping based on EBIC parameter (Inference)
+
+inference1 <- centralityPlot(list("EBIC 0" = network1_0, #EBIC 0 preferred 
+                                  "EBIC .25"=network1_25,
+                                  "EBIC .50"=network1_50), 
+                             labels = short_names,
+                             include= c("Closeness", "Strength", "Betweenness"))
+
+inference2<- centralityPlot(list("EBIC 0" = network2_0, #EBIC 0 preferred
+                                 "EBIC .25"=network2_25,
+                                 "EBIC .50"=network2_50), 
+                            labels = short_names,
+                            include= c("Closeness", "Strength", "Betweenness"))
+
+inference3 <- centralityPlot(list("EBIC 0" = network3_0,
+                                  "EBIC .25"=network3_25, #No preference, same                                                             results
+                                 "EBIC .50"=network3_50), 
+                            labels = short_names,
+                            include= c("Closeness", "Strength", "Betweenness"))
+
+inference4 <- centralityPlot(list("EBIC 0" = network4_0, #EBIC 0 preferred
+                    "EBIC .25"=network4_25,
+                    "EBIC .50"=network4_50), 
+               labels = short_names,
+               include= c("Closeness", "Strength", "Betweenness"))
+
+save(inference1, inference2, inference3, inference4, 
+     file = "inference_indiv.Rdata")
+load("inference_indiv.Rdata")
+
+#Plotting
+
+L <- averageLayout(network1_0, network2_0, network3_0, network4_0)
+
+network1G <- plot(network1_0, layout=L, title="Hypothyroidism", theme="colorblind",pie=pred1$error$Error, border.color='#555555', label.color="#555555", color="#EEEEEE", labels = networknames)
+
+network2G <- plot(network2_0, layout=L, title="Hyperthyrdoism", theme="colorblind", pie=pred2$error$Error, border.color='#555555', label.color="#555555", color="#EEEEEE", labels = networknames)    
+
+network3G <- plot(network3_0, layout=L, title="Euthyroid", theme="colorblind", pie=pred3$error$Error, border.color='#555555', label.color="#555555", color="#EEEEEE", labels = networknames) 
+
+network4G <- plot(network4_0, layout=L, title="Rest", theme="colorblind", pie=pred4$error$Error, border.color='#555555', label.color="#555555", color="#EEEEEE", labels = networknames)
+
+save(network1_0, network1_25, network1_50, 
+     network2_0, network2_25, network2_50, 
+     network3_0, network3_25, network3_50,
+     network4_0, network4_25, network4_50,
+     network1G, network2G, network3G, network4G,
+     file = "IndividualNetworks.Rdata")
+load("IndividualNetworks.Rdata")
+
+
+```
+
+```{r Stability individual networks}
+
+### Estimate and save stability and accuracy (Was also done for EBIC .25 and .5)
+boot1a <- bootnet(network1_0, nBoots = 1000, type = "nonparametric", nCores = 8)
+boot1b <- bootnet(network1_0, nBoots = 1000, type = "case",  nCores = 8,
+                  statistics= c("strength","closeness","betweenness"))
+
+boot2a <- bootnet(network2_0, nBoots = 1000, type = "nonparametric", nCores = 8)
+boot2b <- bootnet(network2_0, nBoots = 1000, type = "case",  nCores = 8,
+                  statistics= c("strength","closeness","betweenness"))
+
+boot3a <- bootnet(network3_0, nBoots = 1000, type = "nonparametric", nCores = 8)
+boot3b <- bootnet(network3_0, nBoots = 1000, type = "case",  nCores = 8,
+                  statistics= c("strength","closeness","betweenness"))
+
+boot4a <- bootnet(network4_0, nBoots = 1000, type = "nonparametric", nCores = 8)
+boot4b <- bootnet(network4_0, nBoots = 1000, type = "case",  nCores = 8,
+                  statistics= c("strength","closeness","betweenness"))
+
+#CS for individual networks (EBIC 0 most accurate)
+cs1 <- corStability(boot1b)  
+cs2 <- corStability(boot2b) 
+cs3 <- corStability(boot3b) 
+cs4 <- corStability(boot4b) 
+cs <- matrix(NA,4,3)
+cs[1,1:3] <- round(cs1, digits=2)
+cs[2,1:3] <- round(cs2, digits=2)
+cs[3,1:3] <- round(cs3, digits=2)
+cs[4,1:3] <- round(cs4, digits=2)
+colnames(cs) <- c("Betweenness", "Closeness", "Strength")
+rownames(cs) <- c("Hypothyroidism", "Hyperthyroidism",
+                  "Euthyroid", "Rest")
+cs
+
+
+pdf("FigS3.pdf")
+plot(boot1a, labels = FALSE, order = "sample") 
+plot(boot2a, labels = FALSE, order = "sample") 
+plot(boot3a, labels = FALSE, order = "sample") 
+plot(boot4a, labels = FALSE, order = "sample") 
+dev.off()
+
+#save(boot1a, boot1b, boot2a, boot2b, boot3a, boot3b, boot4a, boot4b, cs,
+#     boot1_25, boot2_25, boot3_25, boot4_25, cs25,
+#     boot1_5, boot2_5, boot3_5, boot4_5, cs50,
+#    file = "Bootstraps.Rdata")
+#load("Bootstraps.Rdata") 
+
+
+
+```
+
+
+```{r Estimate and plot FGL network}
+
+load("JGLGroups.Rdata")
+
+g2$Arguments
+EGN2 <- EstimateGroupNetwork(groups,
+                            method="InformationCriterion", 
+                            strategy = "sequential",
+                            criterion = "ebic",
+                            gamma = 0,
+                            optimize = TRUE,
+                            weights = "equal",
+                            penalty = "fused",
+                            simplifyOutput = FALSE, 
+                            seed=123, 
+                            ncores=8, 
+                            covfun = cor_auto)
+
+
+L1 = averageLayout(EGN2$network[[1]], 
+                  EGN2$network[[2]], 
+                  EGN2$network[[3]],
+                  EGN2$network[[4]])
+
+g1 <- qgraph(EGN2$network[[1]],
+             #title = "Hypothyroidism", 
+             layout = L1,
+             theme = "colorblind",
+             maximum = 1,
+             pie = pred1$error$R2,
+             pieColor = rep('#377EB8',12),
+             border.width=2, vsize=8, 
+             border.color='#555555', 
+             label.color="#555555", 
+             color="#EEEEEE",
+             labels = short_names)
+                 
+g2$Arguments #Retrieve edges
+
+g2 <- qgraph(EGN2$network[[2]], 
+            # title = "Hyperthyroidism",
+             layout = L1,
+             theme = "colorblind",
+             maximum = 1,
+             pie = pred2$error$R2,
+             pieColor = rep('#377EB8',12),
+             border.width=2, vsize=8, 
+             border.color='#555555', 
+             label.color="#555555", 
+             color="#EEEEEE",
+             labels = networknames)
+
+g3 <- qgraph(EGN2$network[[3]], 
+             #title = "Euthyroid group",
+             layout = L1,
+             theme = "colorblind",
+             maximum = 1,
+             pie = pred3$error$R2,
+             pieColor = rep('#377EB8',12),
+             border.width=2, vsize=8, 
+             border.color='#555555', 
+             label.color="#555555", 
+             color="#EEEEEE",
+             labels = networknames)
+             
+
+g4 <- qgraph(EGN2$network[[4]], 
+            # title = "Rest group",
+             layout = L1,
+             theme = "colorblind",
+             maximum = 1,
+             pie = pred4$error$R2,
+             pieColor = rep('#377EB8',12),
+             border.width=2, vsize=8, 
+             border.color='#555555', 
+             label.color="#555555", 
+             color="#EEEEEE",
+             labels = networknames)
+
+save(EGN2,g1,g2,g3,g4, file="JGLgroups.RData")
+load("JGLgroups.RData")
+
+
+```
+
+
+Network inference through centrality measures for the joint networks
+
+```{r Centrality measures}
+
+#Strength
+
+a <- centralityPlot(g1, include = "Strength")
+b <- centralityPlot(g2, include = "Strength")
+c <- centralityPlot(g3, include = "Strength")
+d <- centralityPlot(g4, include = "Strength")
+
+strength <- as.data.frame(cbind(a$data$value,
+                                b$data$value,
+                                c$data$value,
+                                d$data$value))
+
+strength <- mutate(strength, id = rownames(strength))
+colnames(strength)<-c("1", "2", "3", "4", "Symptoms")
+strength1 <- melt(strength, id = "Symptoms")
+strength1 <- strength1 %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="1", 1)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="2", 2)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="3", 3)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="4", 4)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="5", 5)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="6", 6)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="7", 7)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="8", 8)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="9", 9)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="10", 10)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="11", 11)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="12", 12)) 
+strength1$Symptoms <- as.numeric(strength1$Symptoms)
+
+names(strength1)[2] <- "Dataset"
+
+nodestrength <- ggplot(data=strength1, 
+                       aes(x=Symptoms, y=value, colour=Dataset)) +
+  geom_line() +
+  geom_point(shape = 21, fill = "white", size = 2, stroke = 1.5) +
+  xlab(" ") + ylab("Node strength") +
+  scale_y_continuous(limits = c(0, 4.5)) + 
+  scale_x_continuous(breaks=c(1:12), labels=short_names) +
+  theme_bw() +
+  theme(panel.grid.minor=element_blank(), 
+        axis.text.x = element_text(angle = 60, hjust = 1)) +
+  scale_color_discrete(labels = c("Hypothyroidism", 
+                                                 "Hyperthyroidism", 
+                                                 "Euthyroid", 
+                                                 "Rest"))
+nodestrength
+
+a_1 <- a$data$value
+b_1 <- b$data$value
+c_1 <- c$data$value
+d_1 <- d$data$value
+
+cor(scale(a_1), scale(b_1)) #0.559558
+cor(scale(a_1), scale(c_1)) #0.5938939
+cor(scale(a_1), scale(d_1)) #0.3083057
+cor(scale(b_1), scale(c_1)) #0.5861549
+cor(scale(b_1), scale(d_1)) #0.4733823
+cor(scale(c_1), scale(d_1)) #0.5563176
+
+
+
+#Closeness
+
+a_1 <- centralityPlot(g1, include = "Closeness")
+b_1 <- centralityPlot(g2, include = "Closeness")
+c_1 <- centralityPlot(g3, include = "Closeness")
+d_1 <- centralityPlot(g4, include = "Closeness")
+
+closeness <- as.data.frame(cbind(a_1$data$value,
+                                b_1$data$value,
+                                c_1$data$value,
+                                d_1$data$value))
+
+closeness <- mutate(closeness, id = rownames(closeness))
+colnames(closeness)<-c("1", "2", "3", "4", "Symptoms")
+closeness1 <- melt(closeness, id = "Symptoms")
+closeness1 <- closeness1 %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="1", 1)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="2", 2)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="3", 3)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="4", 4)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="5", 5)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="6", 6)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="7", 7)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="8", 8)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="9", 9)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="10", 10)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="11", 11)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="12", 12)) 
+closeness1$Symptoms <- as.numeric(closeness1$Symptoms)
+
+names(closeness1)[2] <- "Dataset"
+
+closeness2 <- ggplot(data=closeness1, 
+                       aes(x=Symptoms, y=value, colour=Dataset)) +
+  geom_line() +
+  geom_point(shape = 21, fill = "white", size = 2, stroke = 1.5) +
+  xlab(" ") + ylab("Closeness") +
+  scale_y_continuous(limits = c(0, .05)) + 
+  scale_x_continuous(breaks=c(1:12), labels=short_names) +
+  theme_bw() +
+  theme(panel.grid.minor=element_blank(), 
+        axis.text.x = element_text(angle = 60, hjust = 1)) +
+  scale_color_discrete(labels = c("Hypothyroidism", 
+                                                 "Hyperthyroidism", 
+                                                 "Euthyroid", 
+                                                 "Rest"))
+closeness2
+
+#Strength
+
+a_2 <- centralityPlot(g1, include = "Betweenness")
+b_2 <- centralityPlot(g2, include = "Betweenness")
+c_2 <- centralityPlot(g3, include = "Betweenness")
+d_2 <- centralityPlot(g4, include = "Betweenness")
+
+betweenness <- as.data.frame(cbind(a_2$data$value,
+                                b_2$data$value,
+                                c_2$data$value,
+                                d_2$data$value))
+
+betweenness <- mutate(betweenness, id = rownames(betweenness))
+colnames(betweenness)<-c("1", "2", "3", "4", "Symptoms")
+betweenness1 <- melt(betweenness, id = "Symptoms")
+betweenness1 <- betweenness1 %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="1", 1)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="2", 2)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="3", 3)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="4", 4)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="5", 5)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="6", 6)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="7", 7)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="8", 8)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="9", 9)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="10", 10)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="11", 11)) %>%
+            mutate(Symptoms=replace(Symptoms, Symptoms=="12", 12)) 
+betweenness1$Symptoms <- as.numeric(betweenness1$Symptoms)
+
+names(betweenness1)[2] <- "Dataset"
+
+betweenness2 <- ggplot(data=betweenness1, 
+                       aes(x=Symptoms, y=value, colour=Dataset)) +
+  geom_line() +
+  geom_point(shape = 21, fill = "white", size = 2, stroke = 1.5) +
+  xlab(" ") + ylab("Node strength") +
+  scale_y_continuous(limits = c(0, 18)) + 
+  scale_x_continuous(breaks=c(1:12), labels=short_names) +
+  theme_bw() +
+  theme(panel.grid.minor=element_blank(), 
+        axis.text.x = element_text(angle = 60, hjust = 1)) +
+  scale_color_discrete(labels = c("Hypothyroidism", 
+                                                 "Hyperthyroidism", 
+                                                 "Euthyroid", 
+                                                 "Rest"))
+betweenness2
+
+save(nodestrength, closeness2, betweenness2, file = "CentralityJGL.Rdata")
+load("CentralityJGL.Rdata")
+
+```
+
+
+
+```{r Correlations between networks}
+
+#Individual networks v joint networks
+
+cor(getWmat(g1)[lower.tri(getWmat(g1))], getWmat(network1G)[lower.tri(getWmat(network1G))],	method="spearman") #0.719232
+cor(getWmat(g2)[lower.tri(getWmat(g2))], getWmat(network2G)[lower.tri(getWmat(network2G))],	method="spearman") #0.448177
+cor(getWmat(g3)[lower.tri(getWmat(g3))], getWmat(network3G)[lower.tri(getWmat(network3G))],	method="spearman") #0.9053232
+cor(getWmat(g4)[lower.tri(getWmat(g4))], getWmat(network4G)[lower.tri(getWmat(network4G))],	method="spearman") #0.8185899
+
+
+#Joint networks vs joint networks
+
+cor(getWmat(g1)[lower.tri(getWmat(g1))], getWmat(g2)[lower.tri(getWmat(g2))],	method="spearman") #0.4104102
+cor(getWmat(g1)[lower.tri(getWmat(g1))], getWmat(g3)[lower.tri(getWmat(g3))], method="spearman") #0.6099939
+cor(getWmat(g1)[lower.tri(getWmat(g1))], getWmat(g4)[lower.tri(getWmat(g4))], method="spearman") #0.1562255
+
+cor(getWmat(g2)[lower.tri(getWmat(g2))], getWmat(g3)[lower.tri(getWmat(g3))], method="spearman") #0.4581828
+cor(getWmat(g2)[lower.tri(getWmat(g2))], getWmat(g4)[lower.tri(getWmat(g4))], method="spearman") #0.1325598
+
+cor(getWmat(g3)[lower.tri(getWmat(g3))], getWmat(g4)[lower.tri(getWmat(g4))], method="spearman") #0.04144603
+
+
+```
+
+
+Network comparison
+
+a. Control how similar Pearson and polychoric correlations are in order to use NCT test
+
+```{r Control correlation similarity}
+c1 <- cor(hypo)
+c1b <- cor_auto(hypo)
+cor(c1[lower.tri(c1)], 	c1b[lower.tri(c1b)], 	method="spearman") #0.926229
+c2 <- cor(hyper)
+c2b <- cor_auto(hyper)
+cor(c2[lower.tri(c2)], 	c2b[lower.tri(c2b)], 	method="spearman") #0.9769544
+c3 <- cor(healthy)
+c3b <- cor_auto(healthy)
+cor(c3[lower.tri(c3)], 	c3b[lower.tri(c3b)], 	method="spearman") #0.9340779
+c4 <- cor(rest)
+c4b <- cor_auto(rest)
+cor(c4[lower.tri(c4)], 	c4b[lower.tri(c4b)], 	method="spearman") #0.9333681
+
+```
+
+b. Network comparison using NetworkComparisonTest (NCT)
+
+```{r Network comparison}
+hypo_hyper <- NCT(hypo, hyper, 
+                  it=1000, binary.data=FALSE, test.edges=TRUE, 
+                  edges='all', p.adjust.methods = "BH", gamma = 0,
+                  test.centrality = TRUE, centrality = "strength",
+                  make.positive.definite = TRUE, AND = FALSE, progressbar=TRUE)
+
+hypo_hyper$glstrinv.real;hypo_hyper$glstrinv.pval
+hypo_hyper$nwinv.real; hypo_hyper$nwinv.pval
+
+hypo_healthy <- NCT(hypo, healthy,
+                  it=1000, binary.data=FALSE, test.edges=TRUE, edges='all',
+                  p.adjust.methods = "BH", gamma = 0, test.centrality = TRUE, 
+                  centrality = "strength",make.positive.definite = TRUE,  
+                  AND = FALSE,
+                  progressbar=TRUE)
+
+hypo_healthy$glstrinv.real; hypo_healthy$glstrinv.pval
+hypo_healthy$nwinv.real; hypo_healthy$nwinv.pval
+
+hypo_rest <- NCT(hypo, rest, 
+                  it=1000, binary.data=FALSE, test.edges=TRUE, edges='all',
+                  p.adjust.methods = "BH", gamma = 0, test.centrality = TRUE, 
+                  centrality = "strength",make.positive.definite = TRUE,  
+                  AND = FALSE,
+                  progressbar=TRUE)
+
+hypo_rest$glstrinv.real; hypo_rest$glstrinv.pval
+hypo_rest$nwinv.real; hypo_rest$nwinv.pval
+
+hyper_rest <- NCT(hyper, rest, 
+                  it=1000, binary.data=FALSE, test.edges=TRUE, edges='all',
+                  p.adjust.methods = "BH", gamma = 0, test.centrality = TRUE, 
+                  centrality = "strength",make.positive.definite = TRUE,  
+                  AND = FALSE, 
+                  progressbar=TRUE)
+
+hyper_rest$glstrinv.real; hyper_rest$glstrinv.pval
+hyper_rest$nwinv.real; hyper_rest$nwinv.pval
+
+hyper_healthy <- NCT(hyper, healthy, 
+                  it=1000, binary.data=FALSE, test.edges=TRUE, edges='all',
+                  p.adjust.methods = "BH", gamma = 0, test.centrality = TRUE, 
+                  centrality = "strength",make.positive.definite = TRUE,  
+                  AND = FALSE, 
+                  progressbar=TRUE)
+
+hyper_healthy$glstrinv.real; hyper_healthy$glstrinv.pval
+hyper_healthy$nwinv.real; hyper_healthy$nwinv.pval #Significant
+
+healthy_rest <- NCT(healthy, rest, 
+                  it=1000, binary.data=FALSE, test.edges=TRUE, edges='all',
+                  p.adjust.methods = "BH", gamma = 0, test.centrality = TRUE, 
+                  centrality = "strength",make.positive.definite = TRUE,  
+                  AND = FALSE,
+                  progressbar=TRUE)
+
+healthy_rest$glstrinv.real;healthy_rest$glstrinv.pval
+healthy_rest$nwinv.real; healthy_rest$nwinv.pval
+
+comparison_topology <- matrix(NA,4,4)
+comparison_topology[1,2] <- hypo_hyper$nwinv.pval
+comparison_topology[1,3] <- hypo_healthy$nwinv.pval
+comparison_topology[1,4] <- hypo_rest$nwinv.pval
+comparison_topology[2,3] <- hyper_healthy$nwinv.pval
+comparison_topology[2,4] <- hyper_rest$nwinv.pval
+comparison_topology[3,4] <- healthy_rest$nwinv.pval; comparison_topology 
+
+### quantification of differences: count significantly different edges (total number ...)
+sum(hypo_hyper$einv.pvals$"p-value" < 0.05) # 0; 
+sum(hypo_healthy$einv.pvals$"p-value" < 0.05) # 0; 
+sum(hypo_rest$einv.pvals$"p-value" < 0.05) # 0; 
+sum(hyper_healthy$einv.pvals$"p-value" < 0.05) # 0; 
+sum(hyper_rest$einv.pvals$"p-value" < 0.05) # 0; 
+sum(healthy_rest$einv.pvals$"p-value" < 0.05) # 0; 
+
+### NCT global strength
+comparison_strength <- matrix(NA,4,4)
+comparison_strength[1,2] <- hypo_hyper$glstrinv.pval 
+comparison_strength[1,3] <- hypo_healthy$glstrinv.pval 
+comparison_strength[1,4] <- hypo_rest$glstrinv.pval 
+comparison_strength[2,3] <- hyper_healthy$glstrinv.pval 
+comparison_strength[2,4] <- hyper_rest$glstrinv.pval
+comparison_strength[3,4] <- healthy_rest$glstrinv.pval; comparison_strength
+
+save(hypo_hyper, hypo_healthy, hypo_rest, hyper_healthy, hyper_rest, healthy_rest, comparison_strength, comparison_topology,
+     file = "NCT.Rdata")
+load("NCT.Rdata")
+
+plot(hypo_healthy, 
+     what="network")
+plot(hypo_healthy, what="strength")
+```
+
+
+```{r PCA}
+require(stats)
+
+pca_1 <- prcomp(hypo, 
+                center = TRUE, 
+                scale. = TRUE)
+
+pca_2 <- prcomp(hyper, 
+                center = TRUE, 
+                scale. = TRUE)
+
+pca_3 <- prcomp(healthy, 
+                center = TRUE, 
+                scale. = TRUE)
+
+pca_4 <- prcomp(rest, 
+                center = TRUE, 
+                scale. = TRUE)
+
+
+fviz_pca_var(pca_1,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE,    # Avoid text overlapping
+             title = "Variable contributions to Principle Components",
+             ylab = "PC 2 (14.1%)",
+             xlab = "PC 1 (25.7%)")
+
+fviz_eig(pca_1,
+         ggtheme = theme_classic2(),
+         main = "Scree plot Hypothyroidism")
+
+fviz_pca_var(pca_2,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE,    # Avoid text overlapping
+             title = "Variable contributions to Principle Components",
+             ylab = "PC 2 (12.9%)",
+             xlab = "PC 1 (27.2%)")
+
+fviz_eig(pca_2,
+         ggtheme = theme_classic2(),
+         main = "Scree plot Hyperthyroidism")
+
+fviz_pca_var(pca_3,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE,    # Avoid text overlapping
+             title = "Variable contributions to Principle Components",
+             ylab = "PC 2 (13.4%)",
+             xlab = "PC 1 (27.6%)")
+
+fviz_eig(pca_3,
+         ggtheme = theme_classic2(),
+         main = "Scree plot Euthyroid group")
+
+fviz_pca_var(pca_4,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE,    # Avoid text overlapping
+             title = "Variable contributions to Principle Components",
+             ylab = "PC 2 (15.1%)",
+             xlab = "PC 1 (27%)")
+
+fviz_eig(pca_4,
+         ggtheme = theme_classic2(),
+         main = "Scree plot Rest group")
+
+
+
+#Hypo
+summary(pca_1) #Explained variance per component
+round(pca_1$sdev^2, 2) #Eigenvalues
+round(pca_1$rotation, 2)#Loadings
+fviz_eig(pca_1) #Screeplot 
+
+#Hyper
+summary(pca_2) #Explained variance per component
+round(pca_2$sdev^2,2) #Eigenvalues
+round(pca_2$rotation, 2) #Loadings
+fviz_eig(pca_2) #Screeplot
+
+#Healthy
+summary(pca_3) #Explained variance per component
+round(pca_3$sdev^2, 2) #Eigenvalues
+round(pca_3$rotation,2) #Loadings
+fviz_eig(pca_3) #Screeplot
+
+#Rest
+summary(pca_4) #Explained variance per component
+round(pca_4$sdev^2,2) #Eigenvalues
+round(pca_4$rotation,2) #Loadings
+fviz_eig(pca_4) #Screeplot
+```
+
+```{r Significance testing through PCATest}
+
+test1 <- PCAtest(x = hypo, nperm = 1000, nboot = 1000, 
+                 alpha = .05, varcorr = TRUE, indload = TRUE, 
+                 counter = TRUE, plot = TRUE)
+
+test2 <- PCAtest(x = hyper, nperm = 1000, nboot = 1000, 
+                 alpha = .05, varcorr = TRUE, indload = TRUE, 
+                 counter = TRUE, plot = TRUE)
+
+test3 <- PCAtest(x = healthy, nperm = 1000, nboot = 1000, 
+                 alpha = .05, varcorr = TRUE, indload = TRUE, 
+                 counter = TRUE, plot = TRUE)
+
+test4 <- PCAtest(x = rest, nperm = 1000, nboot = 1000, 
+                 alpha = .05, varcorr = TRUE, indload = TRUE, 
+                 counter = TRUE, plot = TRUE)
+
+save(test1, test2, test3, test4, file = "PCAtest.Rdata")
+load("PCAtest.Rdata")
+
+```
+
+```{r Walktrap}
+
+install.packages('sna')
+library(sna)
+library(EGAnet)
+library(GGally)
+
+ega1 <- EGA(hypo,
+            model = "glasso",
+            algorithm = "walktrap",
+            plot.EGA = TRUE,
+            n = NULL,
+            algorithm.args = list(steps = 4),
+            nvar = 4,
+            nfact = 1,
+            load = 0.7)
+
+
+ega2 <- EGA(hyper,
+            model = "glasso",
+            algorithm = "walktrap",
+            plot.EGA = TRUE,
+            n = NULL,
+            algorithm.args = list(steps = 4),
+            nvar = 4,
+            nfact = 1,
+            load = 0.7)
+
+
+ega3 <- EGA(healthy,
+            model = "glasso",
+            algorithm = "walktrap",
+            plot.EGA = TRUE,
+            n = NULL,
+            algorithm.args = list(steps = 4),
+            nvar = 4,
+            nfact = 1,
+            load = 0.7)
+
+ega4 <- EGA(rest,
+            model = "glasso",
+            algorithm = "walktrap",
+            plot.EGA = TRUE,
+            n = NULL,
+            algorithm.args = list(steps = 4),
+            nvar = 4,
+            nfact = 1,
+            load = 0.7)
+
+egafull <- EGA(pooled,
+            model = "glasso",
+            algorithm = "walktrap",
+            plot.EGA = TRUE,
+            n = NULL,
+            algorithm.args = list(steps = 4),
+            nvar = 4,
+            nfact = 1,
+            load = 0.7)
+
+
+save(ega1, ega2, ega3, ega4, egafull, file = "Walktrap.Rdata")
+load("Walktrap.Rdata")
+plot(ega1)
